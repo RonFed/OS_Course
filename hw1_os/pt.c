@@ -21,7 +21,7 @@
 typedef uint64_t pt_entry;
 
 typedef struct {
-    pt_entry entries[PT_ENTRIES_NUM] ;
+    pt_entry entries[PT_ENTRIES_NUM];
 } pt_node_t;
 
 pt_node_t* page_walk(pt_node_t* base_pt, uint64_t vpn, uint8_t allocate) {
@@ -30,7 +30,7 @@ pt_node_t* page_walk(pt_node_t* base_pt, uint64_t vpn, uint8_t allocate) {
     pt_entry* curr_entry;
 
     for (uint32_t i = 1; i < TRIE_DEPTH; i++) {
-        /* sub vpn for this level */
+        /* sub-vpn for this level */
         vpn_i = VPN_I(vpn, i);
         curr_entry = &curr_pt->entries[vpn_i];
         if (!IS_VALID_PTE(*curr_entry)) {
@@ -38,11 +38,13 @@ pt_node_t* page_walk(pt_node_t* base_pt, uint64_t vpn, uint8_t allocate) {
                 /* Invalid entry and we were asked to not allocate so nothing to be done*/
                 return (pt_node_t*)NO_MAPPING;
             }
-            /* Allocate new page table */
+            /* Allocate new page table and set the frame number of
+            the current entry to the alloced page */
             SET_FRAME_N(curr_entry, alloc_page_frame());
             SET_VALID(curr_entry);
         }
-        /* Valid entry so Move to newxt page table node */
+        /* Valid entry so Move to newxt page table node 
+        The pointer gets the virtual address to the next page */
         curr_pt = phys_to_virt(PHYSICAL_ADDR(GET_FRAME_N(*curr_entry), 0));
     }
 
@@ -53,28 +55,35 @@ void page_table_update(uint64_t pt, uint64_t vpn, uint64_t ppn) {
     pt_node_t* base_pt = phys_to_virt(PHYSICAL_ADDR(pt, 0));
     uint8_t allocate = (ppn != NO_MAPPING);
 
+    /* Perform page walk to desired page according to vpn */
     pt_node_t* target_pt = page_walk(base_pt, vpn, allocate);
 
     if ((uint64_t)target_pt != NO_MAPPING) {
+        /* Page walk found a valid page table (last level) */
+        /* Find the desired entry in the page table */
         pt_entry* target_entry = &target_pt->entries[VPN_I(vpn, TRIE_DEPTH)];
-        if (!allocate) {
-            *target_entry = 0;
-        } else {
+        /* Clear the desired entry */
+        *target_entry = 0;
+        if (allocate) {
             SET_VALID(target_entry);
             SET_FRAME_N(target_entry, ppn);
-        }
+        } 
     }
 }
 
 uint64_t page_table_query(uint64_t pt, uint64_t vpn) {
     pt_node_t* base_pt = phys_to_virt(PHYSICAL_ADDR(pt, 0));
+
+    /* find the target page table */
     pt_node_t* target_pt = page_walk(base_pt, vpn, 0);
     pt_entry target_entry;
 
+    /* Check for valid page table found */
     if ((uint64_t)target_pt == NO_MAPPING) {
         return NO_MAPPING;
     }
     
+    /* Find the target entry in the table */
     target_entry = target_pt->entries[VPN_I(vpn, TRIE_DEPTH)];
     if (!IS_VALID_PTE(target_entry)) {
         return NO_MAPPING;
