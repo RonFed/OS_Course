@@ -27,24 +27,34 @@ typedef struct {
 } command_dscr_t;
 
 void sigchld_handler(int signum, siginfo_t * info, void * unused) {
-    printf("hello \n");
-
     if (is_foreground && info->si_pid == current_fg_id) {
         is_foreground = 0;
     }
 
     int status;
     int pid = wait(&status);
-    if (!WIFEXITED(status) && errno != ECHILD) {
-        PRINT_ERROR();
-    }
     return;
+}
+
+void sigint_handler(int signum) {
+    is_foreground = 0;
 }
 
 int prepare(void) {
     is_foreground = 0;
     current_fg_id = 0;
 
+    /* Main Shell process should ignore SIGINT */
+    struct sigaction sigint_action;
+    memset(&sigint_action, 0, sizeof(sigint_action));
+
+    sigint_action.sa_handler = sigint_handler;
+    sigint_action.sa_flags = SA_RESTART;
+    if (sigaction(SIGINT, &sigint_action, NULL) != 0) {
+        return -1;
+    }
+
+    /* Set costum handler for SIGCHLD - avoiidng zombies */
     struct sigaction sigchld_action;
     memset(&sigchld_action, 0, sizeof(sigchld_action));
 
@@ -88,6 +98,9 @@ static int handle_foreground(char** arglist) {
         PRINT_ERROR();
         exit(EXIT_FAILURE);
     } else if (pid == 0) {
+        /* Set the defualt handling for foreground process 
+        i.e : terminate upon Ctl+C */
+        signal(SIGINT, SIG_DFL);
         /* Child process : execute the desired command*/
         if (execvp(arglist[0], arglist) == -1) {
             PRINT_ERROR();
@@ -98,10 +111,6 @@ static int handle_foreground(char** arglist) {
         is_foreground = 1;
         current_fg_id = pid;
         while (is_foreground) {}
-        
-        // if (WEXITSTATUS(status) != 0) {
-        //     PRINT_ERROR();
-        // }
     }
 
     /* THIS NEEDS TO CHANGE */
@@ -116,6 +125,8 @@ static int handle_background(int count, char** arglist) {
         PRINT_ERROR();
         exit(EXIT_FAILURE);
     } else if (pid == 0) {
+        /* Child process is background so ignore Clt+C */
+        signal(SIGINT, SIG_IGN);
         /* Child process : execute the desired command*/
         if (execvp(arglist[0], arglist) == -1) {
             PRINT_ERROR();
