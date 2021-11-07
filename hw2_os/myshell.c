@@ -11,6 +11,9 @@
 #define STDIN_FD        (0)
 #define STDOUT_FD       (1)
 
+static volatile int is_foreground;
+static pid_t current_fg_id;
+
 typedef enum {
     FOREGROUND,
     BACKGROUND,
@@ -23,8 +26,13 @@ typedef struct {
     int shell_symbol_loc;
 } command_dscr_t;
 
-void sigchld_handler(int signum) {
+void sigchld_handler(int signum, siginfo_t * info, void * unused) {
     printf("hello \n");
+
+    if (is_foreground && info->si_pid == current_fg_id) {
+        is_foreground = 0;
+    }
+
     int status;
     int pid = wait(&status);
     if (!WIFEXITED(status) && errno != ECHILD) {
@@ -34,11 +42,14 @@ void sigchld_handler(int signum) {
 }
 
 int prepare(void) {
+    is_foreground = 0;
+    current_fg_id = 0;
+
     struct sigaction sigchld_action;
     memset(&sigchld_action, 0, sizeof(sigchld_action));
 
-    sigchld_action.sa_handler = sigchld_handler;
-    sigchld_action.sa_flags = SA_RESTART;
+    sigchld_action.sa_sigaction = sigchld_handler;
+    sigchld_action.sa_flags = SA_RESTART | SA_SIGINFO;
     
     return sigaction(SIGCHLD, &sigchld_action, NULL);
 }
@@ -84,8 +95,10 @@ static int handle_foreground(char** arglist) {
         }
     } else {
         /* Parent process wait for the foreground process to finish */
-        int status;
-        waitpid(pid, &status, 0);
+        is_foreground = 1;
+        current_fg_id = pid;
+        while (is_foreground) {}
+        
         // if (WEXITSTATUS(status) != 0) {
         //     PRINT_ERROR();
         // }
