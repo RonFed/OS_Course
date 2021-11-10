@@ -3,6 +3,7 @@
 #include <signal.h>
 #include <string.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -120,6 +121,7 @@ static int handle_foreground(char** arglist) {
 static int handle_background(int count, char** arglist) {
     /* remove the '&' from arglist */
     arglist = (char **) realloc(arglist, count * sizeof(char*));
+    arglist[count - 1] = NULL;
     int pid = fork();
     if (pid == -1) {
         PRINT_ERROR();
@@ -208,8 +210,37 @@ static int handle_pipe(int count, int pipe_loc, char** arglist) {
     return 0;
 }
 
-static int handle_redirect() {
-      /* THIS NEEDS TO CHANGE */
+static int handle_redirect(int count, int redirect_loc, char** arglist) {
+    int pid = fork();
+    if (pid == -1) {
+        PRINT_ERROR();
+        exit(EXIT_FAILURE);
+    } else if (pid == 0) { 
+        /* Child process handle the command*/
+        char* redirect_filename = arglist[redirect_loc + 1];
+        arglist[redirect_loc] = NULL;
+        int redirect_fd = open(redirect_filename, O_CREAT | O_RDWR | O_TRUNC, S_IRWXU);
+        if (redirect_fd == -1) {
+            PRINT_ERROR();
+            exit(EXIT_FAILURE);
+        }
+        /* Set stdout to point to the opened file (redirect) */
+        if (dup2(redirect_fd, STDOUT_FD) == -1) {
+            PRINT_ERROR();
+            exit(EXIT_FAILURE);
+        }
+        close(redirect_fd);
+        /* Execute the command : the output will be redirect to redirect_fd*/
+        if (execvp(arglist[0], arglist) == -1) {
+            PRINT_ERROR();
+            exit(EXIT_FAILURE);
+        }  
+    } else {
+        /* Parent process wait for the foreground process to finish */
+        is_foreground = 1;
+        current_fg_id = pid;
+        while (is_foreground) {}
+    }
     return 0;
 }
 
@@ -228,7 +259,7 @@ int process_arglist(int count, char** arglist) {
             result = handle_pipe(count, command.shell_symbol_loc, arglist);
             break;
         case REDIRECT:
-            /* code */
+            result = handle_redirect(count, command.shell_symbol_loc, arglist);
             break;
         default:
             break;
