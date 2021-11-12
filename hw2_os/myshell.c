@@ -47,13 +47,14 @@ void sigchld_handler(int signum, siginfo_t * info, void * unused) {
         is_foreground = 0;
     }
     int status, pid;
-    /* In some cases there may be few processes ready to be reaped 
+    /* In this handler there must be at least one process waiting to be reaped
+    In some cases there may be few processes ready to be reaped 
     In case of pipe - indicate each one of the pipe proccesses finish 
     From Linux manual on signal :
-                Standard signals do not queue.  If multiple instances of a
-                standard signal are generated while that signal is blocked, then
-                only one instance of the signal is marked as pending (and the
-                signal will be delivered just once when it is unblocked).*/
+            Standard signals do not queue.  If multiple instances of a
+            standard signal are generated while that signal is blocked, then
+            only one instance of the signal is marked as pending (and the
+            signal will be delivered just once when it is unblocked).*/
     while((pid = waitpid(-1, &status, WNOHANG|WUNTRACED)) > 0) {
         if (pid == current_pipe_writer) {
             current_pipe_writer = 0;
