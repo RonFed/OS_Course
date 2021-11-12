@@ -210,8 +210,7 @@ static int handle_pipe(int count, int pipe_loc, char** arglist) {
             exit(EXIT_FAILURE);
         }
     } else {
-        /* Parent process 
-        Create second son */
+        /* Parent process : Create second son and set global variable to indicate piping */
         current_pipe_writer = pid_writer;
         int pid_reader = fork();
         if (pid_reader == -1) {
@@ -236,7 +235,7 @@ static int handle_pipe(int count, int pipe_loc, char** arglist) {
             /* Set the flag indicating reader process is active */
             current_pipe_reader = pid_reader;
             /* Parent process wait for 2 of it's children to finish*/
-            /* Close the parent's read/wrtie to pipe options to aloow the children to finish*/
+            /* Close the parent's read/wrtie to pipe options to allow the children to finish*/
             close(pipefd[0]);
             close(pipefd[1]);
 
