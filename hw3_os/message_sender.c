@@ -18,7 +18,7 @@ int main(int argc, char const *argv[])
 
     char const *msg_slot_path = argv[1];
     unsigned int channel_id = atoi(argv[2]);
-    char const *msg_to_pass = argv[1];
+    char const *msg_to_pass = argv[3];
 
     int file_desc;
     int ret_val;

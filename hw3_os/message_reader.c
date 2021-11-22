@@ -47,13 +47,14 @@ int main(int argc, char const *argv[])
 
     /* Print the message to stdout (ret val is the length of
     the message in bytes) */
+    printf("%s  %d  \n" buffer, ret_val);
     ret_val = write(STDOUT_FILENO, buffer, ret_val);
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
-    
+
     close(file_desc);
 
 
