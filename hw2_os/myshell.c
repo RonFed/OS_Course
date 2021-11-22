@@ -153,7 +153,6 @@ static int handle_foreground(char** arglist) {
         while (is_foreground) {}
     }
 
-    /* THIS NEEDS TO CHANGE */
     return 1;
 }
 
