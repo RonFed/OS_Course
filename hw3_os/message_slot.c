@@ -8,20 +8,79 @@
 #include <linux/fs.h>      /* for register_chrdev */
 #include <linux/uaccess.h> /* for get_user and put_user */
 #include <linux/string.h>  /* for memset*/
+#include <linux/slab.h>
 
 MODULE_LICENSE("GPL");
 
 #include "message_slot.h"
 
+/* Global array for message slots instances 
+At most 256 since using register_chrdev() */
+static msg_slot_t* g_msg_slots[MAX_MINORS_AMOUNT];
+
+/*=======================================================================
+============== CHANNELS DATA STRUCTURE FUNCTIONS ========================
+=======================================================================*/
+
+static int add_channel_to_msg_slot(unsigned int slot_minor, msg_slot_channel_t** head, unsigned long channel_id) {
+    msg_slot_channel_t* new_channel = (msg_slot_channel_t*)kmalloc(sizeof(msg_slot_channel_t), GFP_KERNEL);
+    if (!new_channel) {
+        printk(KERN_ERR "kmalloc failed in init_msg_slot");
+        errno = ENOMEM;
+        return FAILURE;
+    }
+    /* Add the new channel to the head of linked list of channels */
+    new_channel->msg_buffer = NULL;
+    new_channel->id = channel_id;
+    new_channel->active = False;
+    new_channel->next = (*head);
+
+    (*head) = new_channel;
+    return SUCCESS;
+}
+
+static msg_slot_channel_t* find_channel(msg_slot_channel_t* head, unsigned long channel_id) {
+    msg_slot_channel_t* tmp = head;
+    while (tmp != NULL) {
+        if (tmp->id == channel_id) {
+            return tmp;
+        }
+        tmp = tmp->next;
+    }
+    return NULL;
+}
+
+static int init_msg_slot(unsigned int minor) {
+    g_msg_slots[minor] = (msg_slot_t*)kmalloc(sizeof(msg_slot_t), GFP_KERNEL);
+    if (!g_msg_slots[minor]) {
+        printk(KERN_ERR "kmalloc failed in init_msg_slot");
+        errno = ENOMEM;
+        return FAILURE;
+    }
+    g_msg_slots[minor]->head = NULL;
+    return SUCCESS;
+}
+
 // The message the device will give when asked
 static char the_message[MAX_BUF_LEN];
 
-/*======================== DEVICE FUNCTIONS =============================*/
+/*=======================================================================
+======================== DEVICE FUNCTIONS ===============================
+=======================================================================*/
+
 static int device_open(struct inode *inode,
-                       struct file *file)
-{
+                       struct file *file) {
     printk("Invoking device_open(%p)\n", file);
+    unsigned int minor = iminor(inode);
+    
+    /* if the minor hasn't been used before, allocate memory for it */
+    if (g_msg_slots[minor] == NULL) {
+        return init_msg_slot(minor);
+    }
+    
+    /* We get here if the minor has been created in the past */
     return SUCCESS;
+    
 }
 
 static int device_release(struct inode *inode,
@@ -47,11 +106,36 @@ static ssize_t device_read(struct file *file,
     return 3;
 }
 
-static ssize_t device_write(struct file *file,
-                            const char __user *buffer,
-                            size_t length,
-                            loff_t *offset)
-{
+static ssize_t device_write(struct file *file, const char __user *buffer, size_t length, loff_t *offset) {
+    /* If no channel was assoicated with the file descriptor exit with error */
+    if (file->private_data == NULL) {
+        errno = EINVAL;
+        return FAILURE;
+    }
+    
+    /* Check for invalid length */
+    if (length == 0 | length > MAX_BUF_LEN) {
+        errno = EMSGSIZE;
+        return FAILURE;
+    }
+
+    unsigned long channel = (unsigned long) file->private_data;
+    unsigned int minor = minor(file->f_inode);
+    msg_slot_t* msg_slot = g_msg_slots[minor];
+    msg_slot_channel_t* curr_channel = find_channel(msg_slot->head, channel);
+
+    if (curr_channel == NULL) {
+        if(add_channel_to_msg_slot(minor, &msg_slot->head, channel) == FAILURE) {
+            /* Couldn't create new channel */
+            return FAILURE;
+        }
+        /* In case of successfull add the new head will be the desired channel */
+        curr_channel = msg_slot->head;
+    }
+
+    if (curr_channel->active == True) {
+        
+    }
     int i;
     printk("Invoking device_write(%p,%ld)\n", file, length);
     for (i = 0; i < length && i < MAX_BUF_LEN; ++i)
@@ -63,11 +147,23 @@ static ssize_t device_write(struct file *file,
     return i;
 }
 
-//----------------------------------------------------------------
 static long device_ioctl(struct file *file,
                          unsigned int ioctl_command_id,
                          unsigned long ioctl_param)
 {
+    /* Validate command type */
+    if (ioctl_command_id != MSG_SLOT_CHANNEL) {
+        errno = EINVAL;
+        return FAILURE;
+    }
+    /* Validate channel id */
+    if (ioctl_param == 0) {
+        errno = EINVAL;
+        return FAILURE;
+    }
+    /* associate the passed channel id with the file descriptor */
+    file->private_data = (void*) ioctl_param;
+
     return SUCCESS;
 }
 
@@ -83,33 +179,25 @@ struct file_operations fops =
         .release = device_release,
 };
 
-//---------------------------------------------------------------
-// Initialize the module - Register the character device
-static int __init simple_init(void)
-{
-    int rc = -1;
-    // init dev struct
-    //   memset( &device_info, 0, sizeof(struct chardev_info) );
 
-    // Register driver capabilities.
-    rc = register_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME, &fops);
+/* Initialize the module - Register the character device 
+and init global memory for driver use */
+static int __init msg_slot_init(void)
+{
+    /* Init the global array for diffrent instances of the module */
+    for (int i = 0; i < MAX_MINORS_AMOUNT; i++) {
+        memset(g_msg_slots[i], 0, sizeof(msg_slot_t));
+    }
+
+    /* Register driver */
+    int rc = register_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME, &fops);
 
     // Negative values signify an error
-    if (rc < 0)
-    {
-        printk(KERN_ALERT "%s registraion failed for  %d\n",
-               DEVICE_FILE_NAME, MAJOR_NUM);
-        return rc;
+    if (rc < 0){
+        printk(KERN_ERR "Failed to init module");
     }
 
     printk("Registeration is successful. ");
-    printk("If you want to talk to the device driver,\n");
-    printk("you have to create a device file:\n");
-    printk("mknod /dev/%s c %d 0\n", DEVICE_FILE_NAME, MAJOR_NUM);
-    printk("You can echo/cat to/from the device file.\n");
-    printk("Dont forget to rm the device file and "
-           "rmmod when you're done\n");
-
     return 0;
 }
 
