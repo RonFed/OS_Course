@@ -39,7 +39,7 @@ int main(int argc, char const *argv[])
 
     char* buffer = (char*) malloc(MAX_BUF_LEN);
     /* Read the last message in the buffer */
-    ret_val = read(file_desc, buffer, 0);
+    ret_val = read(file_desc, buffer, MAX_BUF_LEN);
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));
         exit(EXIT_FAILURE);
@@ -47,7 +47,6 @@ int main(int argc, char const *argv[])
 
     /* Print the message to stdout (ret val is the length of
     the message in bytes) */
-    printf("%s  %d  \n" buffer, ret_val);
     ret_val = write(STDOUT_FILENO, buffer, ret_val);
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));

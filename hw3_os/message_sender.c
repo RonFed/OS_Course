@@ -37,7 +37,7 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
 
-    ret_val = write(file_desc, msg_to_pass, strlen(msg_to_pass) - 1);
+    ret_val = write(file_desc, msg_to_pass, strlen(msg_to_pass));
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));
         exit(EXIT_FAILURE);

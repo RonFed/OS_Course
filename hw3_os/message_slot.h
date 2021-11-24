@@ -19,7 +19,7 @@
 
 typedef struct msg_slot_channel_t {
     void* msg_buffer;
-    int curr_msg_len;
+    unsigned int curr_msg_len;
     unsigned long id;
     unsigned int active;
     struct msg_slot_channel_t* next;
