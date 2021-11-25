@@ -9,6 +9,7 @@
 #include <linux/uaccess.h> /* for get_user and put_user */
 #include <linux/string.h>  /* for memset*/
 #include <linux/slab.h>
+#include <linux/delay.h>
 
 
 MODULE_LICENSE("GPL");
@@ -20,7 +21,7 @@ At most 256 since using register_chrdev() */
 static msg_slot_t* g_msg_slots[MAX_MINORS_AMOUNT];
 
 /*=======================================================================
-============== CHANNELS DATA STRUCTURE FUNCTIONS ========================
+========== CHANNELS DATA STRUCTURE FUNCTIONS - LINKED LIST===============
 =======================================================================*/
 
 static int add_channel_to_msg_slot(unsigned int slot_minor, msg_slot_channel_t** head, unsigned long channel_id) {
@@ -36,7 +37,7 @@ static int add_channel_to_msg_slot(unsigned int slot_minor, msg_slot_channel_t**
     new_channel->next = (*head);
 
     (*head) = new_channel;
-    printk("Adding new channel_id (%ld)\n", channel_id);
+    // printk("Adding new channel_id (%ld)\n", channel_id);
     return SUCCESS;
 }
 
@@ -44,13 +45,27 @@ static msg_slot_channel_t* find_channel(msg_slot_channel_t* head, unsigned long 
     msg_slot_channel_t* tmp = head;
     while (tmp != NULL) {
         if (tmp->id == channel_id) {
-            printk("Found channel_id (%ld)\n", channel_id);
+            // printk("Found channel_id (%ld)\n", channel_id);
             return tmp;
         }
         tmp = tmp->next;
     }
     return NULL;
 }
+
+static void free_channel_lst(msg_slot_channel_t* head) {
+    msg_slot_channel_t* tmp;
+    while (head != NULL) {
+        tmp = head;
+        head = head->next;
+        // printk("freeing channel (%ld)\n", tmp->id);
+        kfree(tmp);
+    }
+}
+
+/*=======================================================================
+======================== DEVICE FUNCTIONS ===============================
+=======================================================================*/
 
 static int init_msg_slot(unsigned int minor) {
     printk("Init msg_slot minor is %d \n", minor);
@@ -63,14 +78,10 @@ static int init_msg_slot(unsigned int minor) {
     return SUCCESS;
 }
 
-/*=======================================================================
-======================== DEVICE FUNCTIONS ===============================
-=======================================================================*/
-
 static int device_open(struct inode *inode,
                        struct file *file) {
     unsigned int minor;
-    printk("Invoking device_open(%p)\n", file);
+    // printk("Invoking device_open(%p)\n", file);
     minor = iminor(inode);
     
     /* if the minor hasn't been used before, allocate memory for it */
@@ -86,7 +97,7 @@ static int device_open(struct inode *inode,
 static int device_release(struct inode *inode,
                           struct file *file)
 {
-    printk("Invoking device_release(%p,%p)\n", inode, file);
+    // printk("Invoking device_release(%p,%p)\n", inode, file);
 
     return SUCCESS;
 }
@@ -116,7 +127,7 @@ static ssize_t device_read(struct file *file, char __user *u_buffer, size_t leng
     if (length < curr_channel->curr_msg_len) {
         return -ENOSPC;
     }
-    printk("Invocing device_read minor is (%d)\n", minor);
+    // printk("Invocing device_read minor is (%d)\n", minor);
 
     if (copy_to_user(u_buffer, curr_channel->msg_buffer, curr_channel->curr_msg_len)) {
         return -EFAULT;
@@ -178,7 +189,7 @@ static ssize_t device_write(struct file *file, const char __user *u_buffer, size
     if (copy_from_user((void*) curr_channel->msg_buffer, u_buffer, length)) {
         return -EFAULT; 
     }
-    printk("Wrote to channel (%ld) msg len is (%ld)\n", channel_id, length);
+    // printk("Wrote to channel (%ld) msg len is (%ld)\n", channel_id, length);
     curr_channel->curr_msg_len = (unsigned int) length;
     
     // return the number of input characters used
@@ -219,7 +230,7 @@ struct file_operations fops =
 /* Initialize the module - Register the character device */
 static int __init msg_slot_init(void)
 {
-    int i, rc;
+    int rc;
 
     /* Register driver */
     rc = register_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME, &fops);
@@ -229,12 +240,22 @@ static int __init msg_slot_init(void)
         printk(KERN_ERR "Failed to init module");
     }
 
-    printk("Registeration is successful. ");
+    printk("Registeration is successful. \n");
     return 0;
 }
 
-static void __exit simple_cleanup(void)
-{
+static void __exit simple_cleanup(void) {
+    int i;
+    /* Free all allocated memory */
+    for (i = 0; i < MAX_MINORS_AMOUNT; i++) {
+        /* Find which message slots have been used */
+        if (g_msg_slots[i] != NULL) {
+            printk("Freeing msg_slot (%d)", i);
+            free_channel_lst(g_msg_slots[i]->head);
+            kfree(g_msg_slots[i]);
+        }
+    }
+    
     // Unregister the device
     // Should always succeed
     unregister_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME);
