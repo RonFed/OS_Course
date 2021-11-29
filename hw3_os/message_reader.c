@@ -38,23 +38,23 @@ int main(int argc, char const *argv[])
     }
 
     char* buffer = (char*) malloc(MAX_BUF_LEN);
-    /* Read the last message in the buffer */
+    /* Read the last message in the channel */
     ret_val = read(file_desc, buffer, MAX_BUF_LEN);
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));
         exit(EXIT_FAILURE);
     }
 
+    /* Close the device */
+    close(file_desc);
+
     /* Print the message to stdout (ret val is the length of
-    the message in bytes) */
+    the message in bytes which was returned from read() ) */
     ret_val = write(STDOUT_FILENO, buffer, ret_val);
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));
         exit(EXIT_FAILURE);
     }
-
-
-    close(file_desc);
 
 
     return 0;

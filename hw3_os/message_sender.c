@@ -17,6 +17,7 @@ int main(int argc, char const *argv[])
     }
 
     char const *msg_slot_path = argv[1];
+    /* Assumes non negative integer */
     unsigned int channel_id = atoi(argv[2]);
     char const *msg_to_pass = argv[3];
 
@@ -31,6 +32,7 @@ int main(int argc, char const *argv[])
         exit(EXIT_FAILURE);
     }
 
+    /* Set the desired channel */
     ret_val = ioctl(file_desc, MSG_SLOT_CHANNEL, channel_id);
     if (ret_val < 0) {
         printf("%s \n", strerror(errno));

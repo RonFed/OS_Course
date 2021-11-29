@@ -21,7 +21,7 @@ At most 256 since using register_chrdev() */
 static msg_slot_t* g_msg_slots[MAX_MINORS_AMOUNT];
 
 /*=======================================================================
-========== CHANNELS DATA STRUCTURE FUNCTIONS - LINKED LIST===============
+========== CHANNELS' DATA STRUCTURE FUNCTIONS - LINKED LIST =============
 =======================================================================*/
 
 static int add_channel_to_msg_slot(unsigned int slot_minor, msg_slot_channel_t** head, unsigned long channel_id) {
@@ -37,7 +37,6 @@ static int add_channel_to_msg_slot(unsigned int slot_minor, msg_slot_channel_t**
     new_channel->next = (*head);
 
     (*head) = new_channel;
-    // printk("Adding new channel_id (%ld)\n", channel_id);
     return SUCCESS;
 }
 
@@ -45,7 +44,6 @@ static msg_slot_channel_t* find_channel(msg_slot_channel_t* head, unsigned long 
     msg_slot_channel_t* tmp = head;
     while (tmp != NULL) {
         if (tmp->id == channel_id) {
-            // printk("Found channel_id (%ld)\n", channel_id);
             return tmp;
         }
         tmp = tmp->next;
@@ -58,7 +56,9 @@ static void free_channel_lst(msg_slot_channel_t* head) {
     while (head != NULL) {
         tmp = head;
         head = head->next;
-        // printk("freeing channel (%ld)\n", tmp->id);
+        if (tmp->active) {
+            kfree(tmp->msg_buffer);
+        }
         kfree(tmp);
     }
 }
@@ -68,7 +68,6 @@ static void free_channel_lst(msg_slot_channel_t* head) {
 =======================================================================*/
 
 static int init_msg_slot(unsigned int minor) {
-    printk("Init msg_slot minor is %d \n", minor);
     g_msg_slots[minor] = (msg_slot_t*)kmalloc(sizeof(msg_slot_t), GFP_KERNEL);
     if (!g_msg_slots[minor]) {
         printk(KERN_ERR "kmalloc failed in init_msg_slot");
@@ -97,7 +96,8 @@ static int device_open(struct inode *inode,
 static int device_release(struct inode *inode,
                           struct file *file)
 {
-    // printk("Invoking device_release(%p,%p)\n", inode, file);
+    /* Nothing to do here since we want to keep the channels data
+    of each slot durring the runtime of the module */
 
     return SUCCESS;
 }
@@ -116,6 +116,7 @@ static ssize_t device_read(struct file *file, char __user *u_buffer, size_t leng
     channel_id = (unsigned long) file->private_data;
     minor = iminor(file->f_inode);
     msg_slot = g_msg_slots[minor];
+    /* look for cannel in linked list */
     curr_channel = find_channel(msg_slot->head, channel_id);
 
     /* Check if no one wrote to this channel */
@@ -173,14 +174,14 @@ static ssize_t device_write(struct file *file, const char __user *u_buffer, size
         so we just realloc */
         curr_channel->msg_buffer = krealloc((void*)curr_channel->msg_buffer, length, GFP_KERNEL);
         if (!curr_channel->msg_buffer) {
-            printk(KERN_ERR "kralloc failed in device_write");
+            printk(KERN_ERR "krealloc failed in device_write");
             return -ENOMEM;
         }   
     } else {
         /* Channel not active, allocate memory and set to active*/
         curr_channel->msg_buffer = kmalloc(length, GFP_KERNEL);
         if (!curr_channel->msg_buffer) {
-            printk(KERN_ERR "kralloc failed in device_write");
+            printk(KERN_ERR "kmalloc failed in device_write");
             return -ENOMEM;
         }   
         curr_channel->active = True;
@@ -232,34 +233,33 @@ static int __init msg_slot_init(void)
 {
     int rc;
 
-    /* Register driver */
+    /* Register driver with hard coded major of 240 */
     rc = register_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME, &fops);
 
     // Negative values signify an error
     if (rc < 0){
         printk(KERN_ERR "Failed to init module");
     }
-
-    printk("Registeration is successful. \n");
+    
     return 0;
 }
 
-static void __exit simple_cleanup(void) {
+static void __exit msg_slot_cleanup(void) {
     int i;
     /* Free all allocated memory */
     for (i = 0; i < MAX_MINORS_AMOUNT; i++) {
         /* Find which message slots have been used */
         if (g_msg_slots[i] != NULL) {
-            printk("Freeing msg_slot (%d)", i);
+            printk("Freeing msg_slot (%d) \n", i);
+            /* Free linked list of channels */
             free_channel_lst(g_msg_slots[i]->head);
             kfree(g_msg_slots[i]);
         }
     }
     
-    // Unregister the device
-    // Should always succeed
+    /* Unregister the device */
     unregister_chrdev(MAJOR_NUM, DEVICE_RANGE_NAME);
 }
 
 module_init(msg_slot_init);
-module_exit(simple_cleanup);
+module_exit(msg_slot_cleanup);
