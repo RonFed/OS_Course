@@ -18,6 +18,7 @@ int g_is_search = False;
 /* Array of threads wait flag 
 if g_threads_waiting[i] == True then thread i is idle (waiting) */
 int* g_threads_waiting;
+int g_threads_num;
 
 pthread_mutex_t search_mutex;
 pthread_cond_t search_cv;
@@ -118,11 +119,14 @@ void *searching_entry(void *thread_id) {
     queue_entry_t* removed_entry;
 
     while (g_is_search) {
-        
+
         pthread_mutex_lock(&search_mutex);
         while (is_dir_queue_empty()) {
+            /* Mark this thread as waiting */
+            g_threads_waiting[thread_id] = True;
             pthread_cond_wait(&search_cv, &search_mutex);
         }
+        g_threads_waiting[thread_id] = False;
         removed_entry = dir_dequeue();
         pthread_mutex_unlock(&search_mutex);
 
@@ -148,15 +152,31 @@ void *searching_entry(void *thread_id) {
                     pthread_mutex_lock(&search_mutex);
                     dir_enqueue(curr_entry->d_name, new_pathname);
                     pthread_mutex_unlock(&search_mutex);
+                } else {
+                    // TODO 
                 }
             }
         }
+
+        pthread_mutex_lock(&search_mutex);
+        int is_someone_working = False;
+        for (int i = 0; i < g_threads_num; i++)
+        {
+            if (g_threads_waiting[i] == False) {
+                /* Found a working thread */
+                is_someone_working = True;
+                break;
+            }
+        }
+        if (!is_someone_working) {
+            /* All threads are idle */
+            g_is_search = False;
+            pthread_cond_broadcast(&search_cv)
+        }
+        pthread_mutex_unlock(&search_mutex);
     }
 
-    
-     
-    return SUCCESS;
-
+    pthread_exit((void*) SUCCESS);
 }
 
 int main(int argc, char const *argv[])
@@ -183,13 +203,13 @@ int main(int argc, char const *argv[])
      /* End of arguments validation */
 
     /* Number of threades is assumed to be a non negative int */
-    int threads_num = atoi(argv[3]);
-    pthread_t* threads_arr = (pthread_t*) malloc(threads_num * sizeof(pthread_t));
+    g_threads_num = atoi(argv[3]);
+    pthread_t* threads_arr = (pthread_t*) malloc(g_threads_num * sizeof(pthread_t));
     if (threads_arr == NULL) {
         fprintf(stderr, "Error in malloc for threads array \n");
         return FAILURE;
     }
-    g_threads_waiting = (int*)calloc(threads_num, sizeof(int));
+    g_threads_waiting = (int*)calloc(g_threads_num, sizeof(int));
     if (g_threads_waiting == NULL) {
         fprintf(stderr, "Error in calloc for g_threads_waiting \n");
         return FAILURE;
@@ -198,7 +218,7 @@ int main(int argc, char const *argv[])
     pthread_mutex_init(&search_mutex, NULL);
     pthread_cond_init(&search_cv, NULL);
 
-    for (long t_id = 0; t_id < threads_num; t_id++) {
+    for (long t_id = 0; t_id < g_threads_num; t_id++) {
         pthread_create(&threads_arr[t_id], NULL, searching_entry, (void *)t_id);
     }
     
