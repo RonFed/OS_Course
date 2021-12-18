@@ -17,8 +17,6 @@
 
 /* Flag indicating threads to work */
 int g_is_search = False;
-/* Flag indicating some thread worked */
-int g_someone_worked = False;
 /* Number of threads currently working */
 atomic_int g_threads_working = 0;
 /* keeping track on fifo order of threads relative to directories 
@@ -43,17 +41,17 @@ pthread_cond_t finish_cv;
 allows for signaling specific thread and implemnting fifo order */
 pthread_cond_t* queue_cv;
 
-typedef struct queue_entry_t {
+typedef struct dir_queue_entry_t {
     char path_name[PATH_MAX];
     char dir_name[PATH_MAX];
-    struct queue_entry_t* next;
-    struct queue_entry_t* prev;
+    struct dir_queue_entry_t* next;
+    struct dir_queue_entry_t* prev;
     long thread_to_handle;
-} queue_entry_t;
+} dir_queue_entry_t;
 
 typedef struct {
-    queue_entry_t* head;
-    queue_entry_t* tail;
+    dir_queue_entry_t* head;
+    dir_queue_entry_t* tail;
     unsigned int count;
 } dir_queue_t;
 
@@ -72,9 +70,9 @@ long next_thread_to_signal() {
     return g_queue.tail->thread_to_handle;
 }
 
-queue_entry_t* dir_dequeue() {
+dir_queue_entry_t* dir_dequeue() {
     /* Assumes the queue isn't empty */
-    queue_entry_t* removed_entry = g_queue.tail;
+    dir_queue_entry_t* removed_entry = g_queue.tail;
     if (g_queue.count == 1) {
         /* The queue will become empty */
         g_queue.head = NULL;
@@ -87,17 +85,8 @@ queue_entry_t* dir_dequeue() {
     return removed_entry;
 }
 
-void print_queue() {
-    queue_entry_t* tmp = g_queue.head;
-    printf("    dir queue : \n");
-    while(tmp) {
-        printf("        path: %s; dir: %s thread: %ld \n", tmp->path_name, tmp->dir_name, tmp->thread_to_handle);
-        tmp = tmp->next;
-    }
-}
-
 void dir_enqueue(const char* dir_name, const char* path_name) {
-    queue_entry_t* new_entry = (queue_entry_t*) malloc(sizeof(queue_entry_t));
+    dir_queue_entry_t* new_entry = (dir_queue_entry_t*) malloc(sizeof(dir_queue_entry_t));
     if (new_entry == NULL) {
         // TODO WHAT TO DO HERE ???
     }
@@ -139,13 +128,25 @@ int is_dot_folder(const char* dir_name) {
     return (strcmp(dir_name, ".") == 0) || (strcmp(dir_name, "..") == 0);
 }
 
+void thread_exit_on_error() {
+    fprintf(stderr, "%s \n", strerror(errno));
+    pthread_mutex_lock(&finish_mutex);
+    g_failed_threads++;
+    g_threads_working--;
+    pthread_cond_signal(&finish_cv);
+    // pthread_mutex_lock(&queue_mutex);
+    // if (!is_dir_queue_empty()) {
+    //     pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
+    // }
+    // pthread_mutex_unlock(&queue_mutex);
+    pthread_mutex_unlock(&finish_mutex);
+    pthread_exit((void*) FAILURE);
+}
+
 void get_stat(const char* pathname, struct stat* entry_stat) {
     if (stat(pathname, entry_stat) == -1) {
-        fprintf(stderr, "from get_stat : %s \n", strerror(errno));
+        thread_exit_on_error();
     }
-
-    // return S_ISDIR(entry_stat.st_mode);
-    // return entry_stat;
 }
 
 int should_thread_sleep(long t_id) {
@@ -155,6 +156,7 @@ int should_thread_sleep(long t_id) {
         } else {
             /* queue is not empty */
             if (is_next_work_for_thread(t_id) == True) {
+                /* nect work is for this thread - so it shouldn't wait */
                 return False;
             } else {
                 return True;
@@ -166,20 +168,69 @@ int should_thread_sleep(long t_id) {
     }
 }
 
-void *searching_entry(void *thread_id) {
-    long t_id = (long) thread_id;
+void wait_for_start() {
     pthread_mutex_lock(&search_mutex);
     while (!g_is_search) {
         pthread_cond_wait(&search_cv, &search_mutex);
         
     }
     pthread_mutex_unlock(&search_mutex);
-    // printf("thread %ld woke up for the first time %lu \n", t_id, (unsigned long)time(NULL));
-    printf("thread %ld woke up for the first time \n", t_id);
+}
+
+void iterate_in_directory(dir_queue_entry_t* removed_entry, DIR* curr_dir) {
+    struct stat entry_stat;
+    struct dirent* curr_entry;
+    while ((curr_entry = readdir(curr_dir)) != NULL) {
+        char new_pathname[PATH_MAX];
+        strcpy(new_pathname, removed_entry->path_name);
+        strcat(new_pathname, "/");
+        strcat(new_pathname, curr_entry->d_name);
+        /* if the entry is '.' ot '..' we ignore it */
+        if (!is_dot_folder(curr_entry->d_name)) {
+            get_stat(new_pathname, &entry_stat);
+            if (S_ISDIR(entry_stat.st_mode)) {
+                /* this is a directory */
+                if ((entry_stat.st_mode & S_IRUSR) && (entry_stat.st_mode & S_IXUSR)) {
+                    /* This directory can be serched - the process has both read and execute permissions for it.*/
+                    /* Get the lock for shared queue */
+                    pthread_mutex_lock(&queue_mutex);
+                    /* Add to the queue */
+                    dir_enqueue(curr_entry->d_name, new_pathname);
+                    /* signal the thread that should handle the directory we found.
+                    this signal won't necessarily cause that thread to start working 
+                    since it could wake before it's turn (for that there is another signaling location
+                    just before we go to wait) */
+                    pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
+                    pthread_mutex_unlock(&queue_mutex);
+                } else {
+                    /* This directory can't be searched */
+                    printf("Directory %s: Permission denied.\n", new_pathname);
+                }
+            } else {
+                /* This is not a directory */
+                if (strstr(curr_entry->d_name, g_search_term) != NULL) {
+                    /* The file name contains the seatch term */
+                    printf("%s\n", new_pathname);
+                    g_files_found++;
+                }
+            }
+        }
+    } 
+}
+
+void open_dir_and_check(DIR** curr_dir, char* path_name) {
+    if((*curr_dir = opendir(path_name)) == NULL) {
+        thread_exit_on_error();
+    }
+}
+
+void *searching_entry(void *thread_id) {
+    long t_id = (long) thread_id;
+
+    wait_for_start();
 
     DIR *curr_dir;
-    struct dirent* curr_entry;
-    queue_entry_t* removed_entry;
+    dir_queue_entry_t* removed_entry;
     int is_working = False;
     while (True) {
 
@@ -202,25 +253,19 @@ void *searching_entry(void *thread_id) {
 
             printf("Thread %ld going to wait \n", t_id);
             /* This thread is going to wait so it's not his turn - signal the 
-            desired thread */
+            desired thread (only if the queue is not empty) */
             if (!is_dir_queue_empty()) {
                 pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
             }
-
             pthread_mutex_unlock(&finish_mutex);
-            pthread_cond_wait(&queue_cv[t_id], &queue_mutex);
-            printf("Thread %ld woke up \n", t_id);
-            
+            pthread_cond_wait(&queue_cv[t_id], &queue_mutex);          
         }
         if (!g_is_search) {
-            printf("Thread %ld exiting \n", t_id);
-            /* Everyone finished so exit 
-             release the lock so other threads could exit */
+            /* global set to false - Everyone finished so exit.
+            release the lock so other threads could exit */
             pthread_mutex_unlock(&queue_mutex);
             pthread_exit((void*) SUCCESS);
         }
-        
-        printf("Thread %ld : #working threads including me: %d\n", t_id, g_threads_working);
         if (!is_working) {
             /* Increment number of working threads only when this thread
             changed from waiting to working */
@@ -229,73 +274,18 @@ void *searching_entry(void *thread_id) {
             pthread_mutex_unlock(&finish_mutex);
             is_working = True;
         }
-        g_someone_worked = True;
-        printf("before removing \n");
-        print_queue();
-        removed_entry = dir_dequeue();
-        printf("after rmoving \n");
-        print_queue();
-        
+        removed_entry = dir_dequeue(); 
         pthread_mutex_unlock(&queue_mutex);
 
         /* This call can't fail becouse of premission reasons since removed_entry was checked
         to have read and execute premissions before added to the queue 
         we check for error that could happen becouse of other reasons (not premissions) */
-        if((curr_dir = opendir(removed_entry->path_name)) == NULL) {
-            fprintf(stderr, "%s \n", strerror(errno));
-            pthread_mutex_lock(&finish_mutex);
-            g_failed_threads++;
-            g_threads_working--;
-            pthread_mutex_unlock(&finish_mutex);
-            pthread_exit((void*) FAILURE);
-        }
+        open_dir_and_check(&curr_dir, removed_entry->path_name);
         
+        iterate_in_directory(removed_entry, curr_dir);
 
-        struct stat entry_stat;
-        int dir_entries_found = 0;
-        while ((curr_entry = readdir(curr_dir)) != NULL) {
-            char new_pathname[PATH_MAX];
-            strcpy(new_pathname, removed_entry->path_name);
-            strcat(new_pathname, "/");
-            strcat(new_pathname, curr_entry->d_name);
-            printf("thread %ld found name : %s path: %s \n",t_id, curr_entry->d_name, new_pathname);
-            /* if the entry is '.' ot '..' we ignore it */
-            if (!is_dot_folder(curr_entry->d_name)) {
-                get_stat(new_pathname, &entry_stat);
-                if (S_ISDIR(entry_stat.st_mode)) {
-                    /* this is a directory */
-                    printf("thread %ld found dir %s inside dir %s \n", t_id, curr_entry->d_name, removed_entry->dir_name);
-                    if ((entry_stat.st_mode & S_IRUSR) && (entry_stat.st_mode & S_IXUSR)) {
-                        /* This directory can be serched - the process has both read and execute permissions for it.*/
-                        dir_entries_found++;
-                        /* Get the lock for shared queue */
-                        pthread_mutex_lock(&queue_mutex);
-                        printf("Enqueu dir name : %s path: %s \n",curr_entry->d_name, new_pathname);
-                        /* Add to the queue */
-                        dir_enqueue(curr_entry->d_name, new_pathname);
-                        print_queue();
-                        /* signal the thread that should handle the directory we found.
-                        this signal won't necessarily cause that thread to start working 
-                        since it could wake before it's turn (for that there is another signaling location
-                        just before we go to wait) */
-                        pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
-                        pthread_mutex_unlock(&queue_mutex);
-                    } else {
-                        /* This directory can't be searched */
-                        printf("Directory %s: Permission denied.\n", new_pathname);
-                    }
-                } else {
-                    /* This is not a directory */
-                    if (strstr(curr_entry->d_name, g_search_term) != NULL) {
-                        /* The file name contains the seatch term */
-                        printf("%s\n", new_pathname);
-                        g_files_found++;
-                    }
-                }
-            }
-        } 
+        closedir(curr_dir);
     }
-    printf("This is bad from thread %ld \n", t_id);
     return (void*)FAILURE;
 
 }
@@ -364,12 +354,8 @@ int main(int argc, char const *argv[])
     g_is_search = True;
     pthread_cond_broadcast(&search_cv);
     pthread_mutex_unlock(&search_mutex);
-
-    // while (!g_someone_worked) {
-    //     printf("No one is working...\n");
-    // }
     
-    pthread_mutex_lock(&finish_mutex);
+    pthread_mutex_lock(&finish_mutex); // Start of finish critical section
     /* The only case where the main thread should should enter the program exit flow is when
         1. the dirictories queue is empty AND no thread is working  
         OR
@@ -378,30 +364,30 @@ int main(int argc, char const *argv[])
         pthread_cond_wait(&finish_cv, &finish_mutex);
     }
     g_is_search = False;
-
-    printf("Main is going to signal all threads to exit \n");
     /* In case there is a thread that didn't work at all 
     (More threads than folders) make sure it exits */
     pthread_mutex_lock(&search_mutex);
     pthread_cond_broadcast(&search_cv);
     pthread_mutex_unlock(&search_mutex);
 
-    /* if we get here the queue was empty and no threads were working so 
+    /* if we get here 2 cases :
+    1.  the queue was empty and no threads were working so 
+        all threads are waiting - we changed g_is_search to False so they'll wake and exit 
     all threads are waiting - we changed g_is_search to False so they'll wake and exit 
-    locking the queue mutex insures that in this point the searching thread are waiting */
+        all threads are waiting - we changed g_is_search to False so they'll wake and exit 
+        locking the queue mutex insures that in this point the searching thread are waiting
+    2.  all searching threads failed (the signal won't have an effect) */
     pthread_mutex_lock(&queue_mutex);
     for (long t_id = 0; t_id < g_threads_num; t_id++) {
         pthread_cond_signal(&queue_cv[t_id]);
     }
     pthread_mutex_unlock(&queue_mutex);
+    pthread_mutex_unlock(&finish_mutex);// End of finish critical section
 
-    pthread_mutex_unlock(&finish_mutex);
-
-    /* Wait for all threads to complete */
+    /* All threads were signaled to exi - tWait for all threads to complete */
     for (int i = 0; i < g_threads_num; i++) {
         pthread_join(threads_arr[i], NULL);
     }
-    printf("all threads joined ! \n");
     pthread_mutex_destroy(&search_mutex);
     pthread_cond_destroy(&search_cv);
 
