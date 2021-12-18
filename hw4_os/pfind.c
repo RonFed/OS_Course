@@ -19,10 +19,6 @@
 int g_is_search = False;
 /* Number of threads currently working */
 atomic_int g_threads_working = 0;
-/* keeping track on fifo order of threads relative to directories 
-this variable is advancing in a cyclic way from 0 to (g_threads_num -1) 
-it is used to assoicate a directory in the queue to a thread that should handle it */
-long g_next_thread_to_work = -1;
 /* Number of thread to be used to search - argument */
 int g_threads_num;
 /* search term from command line argument */
@@ -41,12 +37,23 @@ pthread_cond_t finish_cv;
 allows for signaling specific thread and implemnting fifo order */
 pthread_cond_t* queue_cv;
 
+typedef struct thread_queue_entry_t {
+    long thread_id;
+    struct thread_queue_entry_t* next;
+    struct thread_queue_entry_t* prev;
+} thread_queue_entry_t;
+
+typedef struct {
+    thread_queue_entry_t* head;
+    thread_queue_entry_t* tail;
+    unsigned int count;
+} thread_queue_t;
+
 typedef struct dir_queue_entry_t {
     char path_name[PATH_MAX];
     char dir_name[PATH_MAX];
     struct dir_queue_entry_t* next;
     struct dir_queue_entry_t* prev;
-    long thread_to_handle;
 } dir_queue_entry_t;
 
 typedef struct {
@@ -56,32 +63,52 @@ typedef struct {
 } dir_queue_t;
 
 /* Gloabal dirs queue */
-dir_queue_t g_queue;
+dir_queue_t g_dir_queue;
+thread_queue_t g_thread_queue;
 
 int is_dir_queue_empty() {
-    return g_queue.count == 0;
+    return g_dir_queue.count == 0;
 }
 
-int is_next_work_for_thread(long t_id) {
-    return g_queue.tail->thread_to_handle == t_id;
+int is_thread_queue_empty() {
+    return g_thread_queue.count == 0;
+}
+
+int is_thread_next_for_work(long t_id) {
+    return g_thread_queue.tail->thread_id == t_id;
 }
 
 long next_thread_to_signal() {
-    return g_queue.tail->thread_to_handle;
+    return g_thread_queue.tail->thread_id;
 }
 
 dir_queue_entry_t* dir_dequeue() {
     /* Assumes the queue isn't empty */
-    dir_queue_entry_t* removed_entry = g_queue.tail;
-    if (g_queue.count == 1) {
+    dir_queue_entry_t* removed_entry = g_dir_queue.tail;
+    if (g_dir_queue.count == 1) {
         /* The queue will become empty */
-        g_queue.head = NULL;
-        g_queue.tail = NULL;
+        g_dir_queue.head = NULL;
+        g_dir_queue.tail = NULL;
     } else {
-        g_queue.tail = g_queue.tail->prev;
-        g_queue.tail->next = NULL;
+        g_dir_queue.tail = g_dir_queue.tail->prev;
+        g_dir_queue.tail->next = NULL;
     }
-    g_queue.count--;
+    g_dir_queue.count--;
+    return removed_entry;
+}
+
+thread_queue_entry_t* thread_dequeue() {
+    /* Assumes the queue isn't empty */
+    thread_queue_entry_t* removed_entry = g_thread_queue.tail;
+    if (g_thread_queue.count == 1) {
+        /* The queue will become empty */
+        g_thread_queue.head = NULL;
+        g_thread_queue.tail = NULL;
+    } else {
+        g_thread_queue.tail = g_thread_queue.tail->prev;
+        g_thread_queue.tail->next = NULL;
+    }
+    g_thread_queue.count--;
     return removed_entry;
 }
 
@@ -94,23 +121,46 @@ void dir_enqueue(const char* dir_name, const char* path_name) {
     strcpy(new_entry->dir_name, dir_name);
     strcpy(new_entry->path_name, path_name);
     /* if the queue is empty next will be NULL (single element in queue) */
-    new_entry->next = g_queue.head;
+    new_entry->next = g_dir_queue.head;
     new_entry->prev = NULL;
-    g_next_thread_to_work = (g_next_thread_to_work + 1) % g_threads_num;
-    new_entry->thread_to_handle = g_next_thread_to_work;
-    if (g_queue.count == 0) {
-        g_queue.tail = new_entry;
+    if (g_dir_queue.count == 0) {
+        g_dir_queue.tail = new_entry;
     } else {
-        g_queue.head->prev = new_entry;
+        g_dir_queue.head->prev = new_entry;
     }
-    g_queue.head = new_entry;
-    g_queue.count++;
+    g_dir_queue.head = new_entry;
+    g_dir_queue.count++;
+}
+
+void thread_enqueue(long t_id) {
+    thread_queue_entry_t* new_entry = (thread_queue_entry_t*) malloc(sizeof(thread_queue_entry_t));
+    if (new_entry == NULL) {
+        // TODO WHAT TO DO HERE ???
+    }
+    /* new_entry is inserted as the new head */
+    /* if the queue is empty next will be NULL (single element in queue) */
+    new_entry->next = g_thread_queue.head;
+    new_entry->thread_id = t_id;
+    new_entry->prev = NULL;
+    if (g_thread_queue.count == 0) {
+        g_thread_queue.tail = new_entry;
+    } else {
+        g_thread_queue.head->prev = new_entry;
+    }
+    g_thread_queue.head = new_entry;
+    g_thread_queue.count++;
 }
 
 void dir_queue_init() {
-    g_queue.count = 0;
-    g_queue.head = NULL;
-    g_queue.tail = NULL;
+    g_dir_queue.count = 0;
+    g_dir_queue.head = NULL;
+    g_dir_queue.tail = NULL;
+}
+
+void thread_queue_init() {
+    g_thread_queue.count = 0;
+    g_thread_queue.head = NULL;
+    g_thread_queue.tail = NULL;
 }
 
 int is_searchable(const char* dir_path) {
@@ -134,11 +184,11 @@ void thread_exit_on_error() {
     g_failed_threads++;
     g_threads_working--;
     pthread_cond_signal(&finish_cv);
-    // pthread_mutex_lock(&queue_mutex);
-    // if (!is_dir_queue_empty()) {
-    //     pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
-    // }
-    // pthread_mutex_unlock(&queue_mutex);
+    pthread_mutex_lock(&queue_mutex);
+    if (!is_dir_queue_empty() && !is_thread_queue_empty()) {
+        pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
+    }
+    pthread_mutex_unlock(&queue_mutex);
     pthread_mutex_unlock(&finish_mutex);
     pthread_exit((void*) FAILURE);
 }
@@ -154,9 +204,9 @@ int should_thread_sleep(long t_id) {
         if (is_dir_queue_empty()) {
             return True;
         } else {
-            /* queue is not empty */
-            if (is_next_work_for_thread(t_id) == True) {
-                /* nect work is for this thread - so it shouldn't wait */
+            /* dir queue is not empty */
+            if (is_thread_queue_empty() || is_thread_next_for_work(t_id) == True) {
+                /* next work is for this thread - so it shouldn't wait */
                 return False;
             } else {
                 return True;
@@ -177,7 +227,7 @@ void wait_for_start() {
     pthread_mutex_unlock(&search_mutex);
 }
 
-void iterate_in_directory(dir_queue_entry_t* removed_entry, DIR* curr_dir) {
+void iterate_in_directory(dir_queue_entry_t* removed_entry, DIR* curr_dir, long t_id) {
     struct stat entry_stat;
     struct dirent* curr_entry;
     while ((curr_entry = readdir(curr_dir)) != NULL) {
@@ -200,7 +250,9 @@ void iterate_in_directory(dir_queue_entry_t* removed_entry, DIR* curr_dir) {
                     this signal won't necessarily cause that thread to start working 
                     since it could wake before it's turn (for that there is another signaling location
                     just before we go to wait) */
-                    pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
+                    if (!is_thread_queue_empty()) {
+                        pthread_cond_signal(&queue_cv[next_thread_to_signal()]);
+                    }
                     pthread_mutex_unlock(&queue_mutex);
                 } else {
                     /* This directory can't be searched */
@@ -250,8 +302,8 @@ void *searching_entry(void *thread_id) {
             the pthread_cond_wait is inside this critical section (relative to queue mutex)
             so when main get the signal this thread is realy waiting */
             pthread_cond_signal(&finish_cv);
-
-            printf("Thread %ld going to wait \n", t_id);
+            thread_enqueue(t_id);
+            
             /* This thread is going to wait so it's not his turn - signal the 
             desired thread (only if the queue is not empty) */
             if (!is_dir_queue_empty()) {
@@ -275,6 +327,10 @@ void *searching_entry(void *thread_id) {
             is_working = True;
         }
         removed_entry = dir_dequeue(); 
+        if (!is_thread_queue_empty() && next_thread_to_signal() == t_id) {
+            thread_queue_entry_t* thread =  thread_dequeue();
+            free(thread);
+        }
         pthread_mutex_unlock(&queue_mutex);
 
         /* This call can't fail becouse of premission reasons since removed_entry was checked
@@ -282,7 +338,7 @@ void *searching_entry(void *thread_id) {
         we check for error that could happen becouse of other reasons (not premissions) */
         open_dir_and_check(&curr_dir, removed_entry->path_name);
         
-        iterate_in_directory(removed_entry, curr_dir);
+        iterate_in_directory(removed_entry, curr_dir, t_id);
 
         closedir(curr_dir);
     }
@@ -342,11 +398,12 @@ int main(int argc, char const *argv[])
         fprintf(stderr, "Error in malloc for condition variables array \n");
         return FAILURE;
     }
-
+    thread_queue_init();
     /* Init threads and their corresponding condition variables */
     for (long t_id = 0; t_id < g_threads_num; t_id++) {
         pthread_create(&threads_arr[t_id], NULL, searching_entry, (void *)t_id);
         pthread_cond_init(&queue_cv[t_id], NULL);
+        thread_enqueue(t_id);
     }
     
     /* signal all threads that search can start by raising the flag */
