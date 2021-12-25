@@ -99,16 +99,6 @@ int is_thread_queue_empty()
     return g_thread_queue.count == 0;
 }
 
-int is_thread_next_for_work(long t_id)
-{
-    return g_thread_queue.tail->thread_id == t_id;
-}
-
-long next_thread_to_signal()
-{
-    return g_thread_queue.tail->thread_id;
-}
-
 dir_queue_entry_t *dir_dequeue()
 {
     /* Assumes the queue isn't empty */
