@@ -25,7 +25,7 @@ uint32_t input_file_length(const char *pathname)
     if (stat(pathname, &file_stat) == -1)
     {
         fprintf(stderr, "%s \n", strerror(errno));
-        return FAILURE;
+        exit(EXIT_FAILURE);
     }
     return file_stat.st_size;
 }
@@ -37,26 +37,28 @@ void write_file_to_socket(int socket_fd, int file_fd, int bytes_to_send)
     int current_bytes_read = 0;
     while (total_bytes_read < bytes_to_send)
     {
+        /* *Fill the buffer from the file */
         current_bytes_read = read(file_fd, buffer, BUFFER_SZIE);
-        // printf("Client read %d bytes from file \n", current_bytes_read);
         if (current_bytes_read == 0)
         {
             break;
         }
         if (current_bytes_read < 0)
         {
-            //TODO ERRORS
+            fprintf(stderr, "%s \n", strerror(errno));
+            exit(EXIT_FAILURE);
         }
         total_bytes_read += current_bytes_read;
         uint8_t *buffer_ptr = buffer;
         int bytes_left_to_send = current_bytes_read;
+        /* Send the buffer content to socket */
         while (bytes_left_to_send > 0)
         {
             int bytes_written = write(socket_fd, buffer_ptr, bytes_left_to_send);
-            // printf("Client wrote %d bytes from file \n", bytes_written);
-            if (bytes_written <= 0)
+            if (bytes_written < 0)
             {
-                // TODO ERRORS
+                fprintf(stderr, "%s \n", strerror(errno));
+                exit(EXIT_FAILURE);
             }
             bytes_left_to_send -= bytes_written;
             buffer_ptr += bytes_written;
@@ -74,13 +76,35 @@ void read_result_from_server(int socket_fd, uint8_t *data_ptr)
                               sizeof(uint32_t) - total_bytes_read);
         if (bytes_read < 0)
         {
-            // TODO
+            fprintf(stderr, "%s \n", strerror(errno));
+            exit(EXIT_FAILURE);
         }
         else
         {
             total_bytes_read += bytes_read;
         }
     } while (total_bytes_read < sizeof(uint32_t));
+}
+
+void write_stream_size_to_server(int socket_fd, uint8_t* stream_size_ptr) {
+    uint8_t total_bytes_written = 0;
+    do
+    {
+        int bytes_written = write(socket_fd,
+                                  stream_size_ptr + total_bytes_written,
+                                  sizeof(uint32_t) - total_bytes_written);
+        if (bytes_written < 0)
+        {
+            /* On any error condition, print an error message to stderr containing the errno string (i.e., with
+                perror() or strerror()) and exit with exit code 1.*/
+            fprintf(stderr, "%s \n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        else
+        {
+            total_bytes_written += bytes_written;
+        }
+    } while (total_bytes_written < sizeof(uint32_t));
 }
 
 int main(int argc, char const *argv[])
@@ -96,23 +120,22 @@ int main(int argc, char const *argv[])
     if (argc != 4)
     {
         fprintf(stderr, "Number of arguments is wrong \n");
-        return FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     input_file_fd = open(argv[3], O_RDONLY);
     if (input_file_fd < 0)
     {
         fprintf(stderr, "%s \n", strerror(errno));
-        return FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     uint32_t file_length = input_file_length(argv[3]);
-
     socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (socket_fd < 0)
     {
         fprintf(stderr, "%s \n", strerror(errno));
-        return FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     uint16_t server_port = (uint16_t)atoi(argv[2]);
@@ -120,40 +143,30 @@ int main(int argc, char const *argv[])
 
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(server_port);
-    server_addr.sin_addr.s_addr = inet_addr(argv[1]);
+    
+    if (inet_pton(AF_INET, argv[1], &(server_addr.sin_addr)) == 0) {
+        fprintf(stderr, "%s \n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
 
     if (connect(socket_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0)
     {
         fprintf(stderr, "%s \n", strerror(errno));
-        return FAILURE;
+        exit(EXIT_FAILURE);
     }
 
-    /* Wrie the stream size to server */
+    /* Wrie the stream size to server 
+    convert the file lenth to network format */
     uint32_t file_length_net = htonl(file_length);
     uint8_t *stream_size_ptr = (uint8_t *)&file_length_net;
-    uint8_t total_bytes_written = 0;
-    do
-    {
-        int bytes_written = write(socket_fd,
-                                  stream_size_ptr + total_bytes_written,
-                                  sizeof(uint32_t) - total_bytes_written);
-        printf("client wrote %d bytes\n", bytes_written);
-        if (bytes_written < 0)
-        {
-            // TODO
-            printf("%s\n", strerror(errno));
-        }
-        else
-        {
-            total_bytes_written += bytes_written;
-        }
-    } while (total_bytes_written < sizeof(uint32_t));
 
-    printf("file length %d and net %d: \n", file_length, file_length_net);
+    write_stream_size_to_server(socket_fd, stream_size_ptr);
+
     write_file_to_socket(socket_fd, input_file_fd, file_length);
 
     uint32_t pcc_from_server = 0;
     read_result_from_server(socket_fd, (uint8_t*)&pcc_from_server);
+    /* Convert the result from server to hos format */
     pcc_from_server = ntohl(pcc_from_server);
 
     printf("# of printable characters: %u\n", pcc_from_server);
