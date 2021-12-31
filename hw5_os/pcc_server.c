@@ -197,6 +197,14 @@ int main(int argc, char const *argv[])
         return FAILURE;
     }
 
+    int on = 1;
+    /* Enabling the socket to be re-used quickly */
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
+    {
+        fprintf(stderr, "%s \n", strerror(errno));
+        return FAILURE;
+    }
+
     memset(&serv_addr, 0, sizeof(struct sockaddr_in));
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -214,20 +222,12 @@ int main(int argc, char const *argv[])
         return FAILURE;
     }
 
-    int on = 1;
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
-    {
-        fprintf(stderr, "%s \n", strerror(errno));
-        return FAILURE;
-    }
-
     signal(SIGINT, sig_int_handler);
 
     g_server_is_running = True;
 
     while (g_server_is_running)
     {
-        g_server_is_processing = False;
         connection_fd = accept(socket_fd, NULL, NULL);
         if (connection_fd == -1)
         {
@@ -236,9 +236,10 @@ int main(int argc, char const *argv[])
         }
         else
         {
+            /* Mark the server in processing mode */
             g_server_is_processing = True;
         }
-        uint32_t printable_counter = 0;
+        uint32_t printable_chars_counter = 0;
         /* this variable is used to detect errors regarding the connection
         with the client, in case one of the following steps results in such error
         we will continue to next client and the total pcc won't be updated*/
@@ -247,6 +248,7 @@ int main(int argc, char const *argv[])
         /* Read the stream size from client */
         stream_byte_size = read_stream_size_from_client(connection_fd, &error_status);
         if (error_status == True) {
+            close(connection_fd);
             continue;
         }
         /* reset the pcc count for current client */
@@ -256,21 +258,26 @@ int main(int argc, char const *argv[])
         this operation will update the current pcc_client struct and will return the 
         printable chars count for the current client 
         Next, convert the result to network format*/
-        printable_counter = read_stream_from_client(stream_byte_size, connection_fd, &error_status);
+        printable_chars_counter = read_stream_from_client(stream_byte_size, connection_fd, &error_status);
         if (error_status == True) {
+            close(connection_fd);
             continue;
         } else {
-            printable_counter = htonl(printable_counter);
+            printable_chars_counter = htonl(printable_chars_counter);
         }
 
-        uint8_t *printable_counter_ptr = (uint8_t *)&printable_counter;
+        uint8_t *printable_counter_ptr = (uint8_t *)&printable_chars_counter;
         /* Send to client number of printable charcters (in network format) */
         send_printable_counter_to_client(connection_fd, printable_counter_ptr, &error_status);
         if (error_status == True) {
+            close(connection_fd);
             continue;
         } else {
             /* Use the pcc for client to update the total pcc struct*/
             update_pcc_total();
+            close(connection_fd);
+            /* Closed the socket, server is now not processing */
+            g_server_is_processing = False;
         }
     }
 
